@@ -1,4 +1,4 @@
-"""ChromaDB wrapper with local, quota-free embeddings.
+"""Vector store: LangChain's Chroma wrapper over a local, persistent DB.
 
 Embeddings run in-process via fastembed (ONNX, no PyTorch — which matters on a
 machine with little free RAM). A hosted embedding API meters every record, and
@@ -16,52 +16,20 @@ on top and left 1984, Brave New World and The Handmaid's Tale outside the top
 A collection is fixed-width, so changing EMBED_MODEL requires `--reset`.
 
 BGE is an *asymmetric* model: documents are embedded plain, queries get an
-instruction prefix. fastembed's `query_embed` applies it, so queries go through
-`embed_query` here rather than Chroma's `query_texts`.
+instruction prefix. `FastEmbedEmbeddings` honours that split — `embed_query`
+calls fastembed's `query_embed`, `embed_documents` its plain `embed` — so the
+LangChain interface preserves the behaviour the retrieval quality depends on.
 """
 from __future__ import annotations
 
 import logging
 
 import chromadb
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from chromadb.config import Settings
-from fastembed import TextEmbedding
+from langchain_chroma import Chroma
+from langchain_community.embeddings import FastEmbedEmbeddings
 
 from . import config
-
-_model: TextEmbedding | None = None
-
-
-def model() -> TextEmbedding:
-    global _model
-    if _model is None:
-        _model = TextEmbedding(config.EMBED_MODEL)
-    return _model
-
-
-class LocalEmbeddingFunction(EmbeddingFunction):
-    def __call__(self, input: Documents) -> Embeddings:
-        # batch_size is pinned rather than left to fastembed's default of 256.
-        # Without it, memory depends on how many documents the *caller* hands
-        # over, so a large upsert silently becomes a 7GB forward pass and the
-        # process is OOM-killed. Bounding it here means no caller can do that.
-        return [
-            vector.tolist()
-            for vector in model().embed(list(input), batch_size=config.EMBED_BATCH)
-        ]
-
-    def name(self) -> str:
-        return f"fastembed-{config.EMBED_MODEL.split('/')[-1]}"
-
-
-def embed_query(text: str) -> list[float]:
-    """Query-side embedding, with BGE's retrieval instruction prefix applied."""
-    return next(iter(model().query_embed([text]))).tolist()
-
-
-_client = None
-_collection = None
 
 # Chroma calls posthog's old `capture(user_id, event, properties)`; posthog >= 6
 # takes one positional argument, so every event raises a TypeError that Chroma
@@ -69,6 +37,21 @@ _collection = None
 # only way to keep the console readable on an env with a newer posthog is to
 # silence the logger that reports it. requirements.txt pins the working version.
 logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
+_embeddings: FastEmbedEmbeddings | None = None
+_client = None
+_vectorstore: Chroma | None = None
+
+
+def embeddings() -> FastEmbedEmbeddings:
+    """The ONNX model, loaded once — it costs a second or two and ~400MB."""
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = FastEmbedEmbeddings(
+            model_name=config.EMBED_MODEL,
+            batch_size=config.EMBED_BATCH,
+        )
+    return _embeddings
 
 
 def client():
@@ -83,31 +66,27 @@ def client():
     return _client
 
 
-def collection(reset: bool = False):
-    global _collection
-    if _collection is not None and not reset:
-        return _collection
+def vectorstore(reset: bool = False) -> Chroma:
+    global _vectorstore
+    if _vectorstore is not None and not reset:
+        return _vectorstore
 
-    chroma = client()
-
-    if reset:
-        try:
-            chroma.delete_collection(config.COLLECTION)
-        except Exception:
-            pass  # nothing to delete on a first run
-
-    _collection = chroma.get_or_create_collection(
-        name=config.COLLECTION,
-        embedding_function=LocalEmbeddingFunction(),
+    _vectorstore = Chroma(
+        client=client(),
+        collection_name=config.COLLECTION,
+        embedding_function=embeddings(),
         # BGE vectors are meant to be compared by cosine; Chroma defaults to L2,
-        # which ranks differently.
-        metadata={"hnsw:space": "cosine"},
+        # which ranks differently. LangChain reads this back off the collection
+        # to pick `1 - distance` as its relevance score.
+        collection_metadata={"hnsw:space": "cosine"},
     )
-    return _collection
+    if reset:
+        _vectorstore.reset_collection()
+    return _vectorstore
 
 
 def count() -> int:
     try:
-        return collection().count()
+        return vectorstore()._collection.count()
     except Exception:
         return 0

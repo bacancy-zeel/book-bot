@@ -26,16 +26,17 @@ meant to be read — are in [Design notes](#design-notes) below.
 | Layer | Technology |
 |---|---|
 | UI | [Streamlit](https://streamlit.io/) 1.40 (Python 3.10+) |
-| Vector store | [ChromaDB](https://www.trychroma.com/) 0.5 — persisted to `./chroma_data`, cosine distance |
-| Embeddings | [fastembed](https://github.com/qdrant/fastembed) (ONNX, no PyTorch) — `BAAI/bge-base-en-v1.5`, 768-dim, run locally |
-| LLM (answers) | Google Gemini (`gemini-3.6-flash`) — one call per question |
-| Chat history | SQLite — `./chat_history.sqlite3` |
+| Orchestration | [LangChain](https://python.langchain.com/) — LCEL chain, `Document`s, retriever, chat message history |
+| Vector store | [ChromaDB](https://www.trychroma.com/) 0.5 via `langchain-chroma` — persisted to `./chroma_data`, cosine distance |
+| Embeddings | `FastEmbedEmbeddings` over [fastembed](https://github.com/qdrant/fastembed) (ONNX, no PyTorch) — `BAAI/bge-base-en-v1.5`, 768-dim, run locally |
+| LLM (answers) | Google Gemini (`gemini-3.6-flash`) via `ChatGoogleGenerativeAI` — one call per question |
+| Chat history | SQLite — `./chat_history.sqlite3`, behind a LangChain `BaseChatMessageHistory` |
 | Source data | A Goodreads-style books CSV |
 
 ```
- Ingest → CSV row → one record per book → Embed locally (BGE) → Store (ChromaDB)
+ Ingest → CSV row → one Document per book → Embed locally (BGE) → Store (ChromaDB)
  Ask    → Embed question (BGE query prefix) → Retrieve nearest books (ChromaDB, cosine)
-        → Generate cited answer (Gemini) → Persist (SQLite)
+        → prompt | Gemini | StrOutputParser → cited answer → Persist (SQLite)
 ```
 
 Only generation touches a hosted API. Embedding is local, which is what makes
@@ -95,8 +96,8 @@ indexing a few thousand books free — see [Design notes](#design-notes).
    ```
 
    The first run downloads the embedding model. Each book gets a deterministic
-   id and is written with `upsert`, so re-running skips what is already stored
-   — an interrupted run can simply be repeated.
+   id, so re-running skips what is already stored — an interrupted run can
+   simply be repeated.
 
 4. **Run the app**
 
@@ -153,8 +154,9 @@ search on this catalogue — for *"a dystopian novel about surveillance and
 government control"* it surfaced spy thrillers rather than dystopias.
 
 BGE is **asymmetric**: documents are embedded plain, queries get an instruction
-prefix. `rag/store.py` applies it via `embed_query`, which is why retrieval
-passes `query_embeddings` rather than Chroma's `query_texts`.
+prefix. LangChain's `FastEmbedEmbeddings` keeps that split — `embed_query` calls
+fastembed's `query_embed`, `embed_documents` its plain `embed` — so the
+framework preserves the behaviour retrieval quality depends on.
 
 A Chroma collection is fixed-width, so changing `EMBED_MODEL` means a `--reset`
 rebuild. `BAAI/bge-small-en-v1.5` is the cheaper option — 384-dim, a third of
@@ -172,6 +174,24 @@ hundred tokens, so leading metadata pushes the blurb out of the window entirely.
 
 One record per book, never fixed-size chunks — a token window would cut a blurb
 in half and glue it to an unrelated book.
+
+### Where LangChain sits
+
+The pipeline is assembled from LangChain pieces rather than hand-rolled calls:
+ingestion builds `Document`s, the store is a `langchain-chroma` vector store,
+retrieval goes through `similarity_search_with_relevance_scores`, generation is
+an LCEL chain (`prompt | model | StrOutputParser`), and the sidebar's SQLite
+tables are exposed as a `BaseChatMessageHistory` so past turns drop straight
+into the prompt's `MessagesPlaceholder`.
+
+Two things it buys directly: the per-model quota fallback is `with_fallbacks`
+rather than a retry loop, and the retrieved books that grounded an answer ride
+in each message's `additional_kwargs`, so a reopened conversation redraws its
+source cards.
+
+Version note: `langchain-chroma` 1.x requires ChromaDB 1.x, which would migrate
+the on-disk index. This project pins `langchain-chroma` 0.2.x, the line that
+works against a 0.5 store, so an existing `chroma_data/` needs no rebuild.
 
 ### Reading MIN_SIMILARITY
 

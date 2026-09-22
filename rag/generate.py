@@ -1,12 +1,24 @@
-"""Grounded answer generation.
+"""Grounded answer generation, as an LCEL chain.
 
 Only this step calls a hosted model, and only once per question — which is why
 a free-tier key is enough here even though it could never have embedded the
 catalogue.
+
+The chain is `prompt | model | StrOutputParser`, one per configured model,
+stacked with `with_fallbacks` so a model that has burned through its daily
+free-tier quota hands over to the next one. Fallbacks fire on quota errors
+only: a bad key or a malformed request should surface immediately rather than
+be retried three times over.
 """
 from __future__ import annotations
 
-import google.generativeai as genai
+from functools import lru_cache
+
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from . import config
 from .retrieve import Hit
@@ -28,9 +40,21 @@ matched this question. Say so plainly and suggest the user rephrase or ask
 about a different subject. Do not answer from memory and do not cite anything.
 """
 
+# The instruction is passed as a *value*, not as template text, so brackets and
+# braces inside a book blurb are never mistaken for template variables.
+PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "{instruction}"),
+    MessagesPlaceholder("history"),
+    ("human", "{question}"),
+])
+
 
 class GenerationError(RuntimeError):
     pass
+
+
+class _QuotaExceeded(RuntimeError):
+    """Raised for a 429 so `with_fallbacks` can tell it from a real failure."""
 
 
 def _is_quota_error(error: Exception) -> bool:
@@ -38,14 +62,41 @@ def _is_quota_error(error: Exception) -> bool:
     return "429" in text or "quota" in text or "rate limit" in text
 
 
-def _chain() -> list[str]:
+def _models() -> list[str]:
     """Primary model first, then the fallbacks, without repeats."""
-    seen, chain = set(), []
+    seen, names = set(), []
     for name in [config.GEMINI_CHAT_MODEL, *config.GEMINI_FALLBACK_MODELS]:
         if name and name not in seen:
             seen.add(name)
-            chain.append(name)
-    return chain
+            names.append(name)
+    return names
+
+
+def _guarded(runnable: Runnable, name: str) -> Runnable:
+    """Sort a model's failures into 'try the next model' and 'give up'."""
+    def invoke(payload: dict) -> str:
+        try:
+            return runnable.invoke(payload)
+        except Exception as error:  # provider errors vary too much to enumerate
+            if _is_quota_error(error):
+                raise _QuotaExceeded(name) from error
+            # Only the first line; the rest is a protobuf dump.
+            raise GenerationError(str(error).strip().splitlines()[0]) from error
+
+    return RunnableLambda(invoke)
+
+
+@lru_cache(maxsize=1)
+def chain() -> Runnable:
+    """Built once per process; the models are fixed by config at startup."""
+    links = [
+        _guarded(PROMPT | ChatGoogleGenerativeAI(
+            model=name, google_api_key=config.GEMINI_API_KEY,
+        ) | StrOutputParser(), name)
+        for name in _models()
+    ]
+    first, *rest = links
+    return first.with_fallbacks(rest, exceptions_to_handle=(_QuotaExceeded,))
 
 
 def _context(hits: list[Hit]) -> str:
@@ -63,36 +114,25 @@ def _context(hits: list[Hit]) -> str:
     return f"CONTEXT\n{rule}\n" + f"\n\n{'-' * 60}\n\n".join(blocks) + f"\n{rule}\nEND CONTEXT"
 
 
-def answer(question: str, hits: list[Hit], history: list[dict] | None = None) -> str:
+def answer(question: str, hits: list[Hit],
+           history: list[BaseMessage] | None = None) -> str:
     if not config.GEMINI_API_KEY:
         raise GenerationError("GEMINI_API_KEY is not set.")
-
-    genai.configure(api_key=config.GEMINI_API_KEY)
 
     instruction = SYSTEM_PROMPT if hits else NO_CONTEXT_PROMPT
     if hits:
         instruction = f"{instruction}\n\n{_context(hits)}"
 
-    turns = [
-        {"role": "user" if t["role"] == "user" else "model",
-         "parts": [t["content"]]}
-        for t in (history or [])
-    ]
-
-    chain = _chain()
-    for name in chain:
-        model = genai.GenerativeModel(name, system_instruction=instruction)
-        try:
-            chat = model.start_chat(history=turns)
-            return chat.send_message(question).text
-        except Exception as error:  # provider errors vary too much to enumerate
-            if _is_quota_error(error):
-                continue  # daily quota is per model — try the next one
-            # Only the first line; the rest is a protobuf dump.
-            raise GenerationError(str(error).strip().splitlines()[0]) from error
-
-    raise GenerationError(
-        "Daily free-tier quota is used up on every configured model "
-        f"({', '.join(chain)}). Try again tomorrow, set GEMINI_CHAT_MODEL to "
-        "another model, or enable billing on the API key."
-    )
+    try:
+        return chain().invoke({
+            "instruction": instruction,
+            "question": question,
+            "history": history or [],
+        })
+    except _QuotaExceeded as error:
+        raise GenerationError(
+            "Daily free-tier quota is used up on every configured model "
+            f"({', '.join(_models())}). Try again tomorrow, set "
+            "GEMINI_CHAT_MODEL to another model, or enable billing on the API "
+            "key."
+        ) from error

@@ -1,11 +1,17 @@
-# Local, quota-free embeddings: chromadb ships an ONNX MiniLM embedder
-# (all-MiniLM-L6-v2, 384-dim) so nothing is metered and torch is not needed —
-# which matters on a machine with ~3GB RAM free.
+# Local, quota-free embeddings: fastembed runs BGE as ONNX in-process, so
+# nothing is metered and torch is not needed — which matters on a machine with
+# ~3GB RAM free.
 chromadb==0.5.23
 # chromadb 0.5.x leaves posthog unpinned but still calls its pre-6.0 signature.
 posthog<6
 fastembed==0.8.0
-google-generativeai==0.8.3
+# LangChain: Chroma vector store, Gemini chat model, fastembed embeddings.
+# langchain-chroma 1.x requires chromadb 1.x, which would migrate the on-disk
+# index — 0.2.x is the line that works against the 0.5 store.
+langchain-core==1.6.4
+langchain-chroma==0.2.3
+langchain-community==0.4.2
+langchain-google-genai==4.4.0
 streamlit==1.40.2
 pandas==2.2.3
 python-dotenv==1.0.1

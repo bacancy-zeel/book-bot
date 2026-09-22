@@ -425,14 +425,16 @@ def main() -> None:
     if conversation_id and not history.exists(conversation_id):
         conversation_id = st.session_state.conversation_id = None  # deleted
 
-    thread = history.messages(conversation_id)
+    chat = history.ConversationHistory(conversation_id)
+    thread = chat.messages
 
     if thread:
         for message in thread:
-            if message["role"] == "user":
-                render_user(message["content"])
+            if message.type == "human":
+                render_user(message.content)
             else:
-                render_assistant(message["content"], message.get("hits"))
+                render_assistant(message.content,
+                                 message.additional_kwargs.get("hits"))
     else:
         render_welcome()
 
@@ -443,8 +445,9 @@ def main() -> None:
         if not conversation_id:
             conversation_id = history.create(history.title_from(question))
             st.session_state.conversation_id = conversation_id
+            chat = history.ConversationHistory(conversation_id)
 
-        history.add_message(conversation_id, "user", question)
+        chat.add_user_message(question)
         render_user(question)
 
         st.markdown('<div class="msg-label">Book Bot</div>',
@@ -465,8 +468,9 @@ def main() -> None:
         if hits:
             render_sources(hits)
 
-        history.add_message(conversation_id, "assistant", reply,
-                            [as_dict(h) for h in hits])
+        chat.add_messages([
+            history.answer_message(reply, [as_dict(h) for h in hits])
+        ])
 
     # Rendered last so a chat started on this run is already in the list —
     # otherwise the new title would only appear on the following rerun.

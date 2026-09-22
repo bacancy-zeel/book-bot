@@ -4,6 +4,11 @@ Conversations live in a small SQLite file of their own — `st.session_state` is
 wiped by a browser refresh or a server restart, so a sidebar built on it would
 lose every past chat. SQLite keeps the store single-file and stdlib-only.
 
+The per-conversation view is a LangChain `BaseChatMessageHistory`, so the
+stored turns drop straight into a prompt's MessagesPlaceholder. The retrieved
+books that backed an answer ride along in the message's `additional_kwargs`,
+where the UI reads them back to redraw its source cards.
+
 A connection is opened per call rather than cached: Streamlit reruns the script
 on its own threads, and a shared sqlite3 connection is not thread-safe.
 """
@@ -15,8 +20,11 @@ import re
 import sqlite3
 import time
 import uuid
+from typing import Sequence
 
 from dotenv import load_dotenv
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 # This module is imported before rag.config, which is what normally reads the
 # .env — without this, HISTORY_DB set there would be ignored.
@@ -95,41 +103,68 @@ def exists(conversation_id: str | None) -> bool:
     return row is not None
 
 
-def messages(conversation_id: str | None) -> list[dict]:
-    if not conversation_id:
-        return []
-    with _connect() as con:
-        rows = con.execute(
-            "SELECT role, content, hits FROM messages"
-            " WHERE conversation_id = ? ORDER BY id",
-            (conversation_id,),
-        ).fetchall()
-    return [
-        {
-            "role": row["role"],
-            "content": row["content"],
-            "hits": json.loads(row["hits"]) if row["hits"] else [],
-        }
-        for row in rows
-    ]
+class ConversationHistory(BaseChatMessageHistory):
+    """The turns of one conversation, as LangChain messages."""
+
+    def __init__(self, conversation_id: str | None) -> None:
+        self.conversation_id = conversation_id
+
+    @property
+    def messages(self) -> list[BaseMessage]:
+        if not self.conversation_id:
+            return []  # a chat that has not been started yet
+        with _connect() as con:
+            rows = con.execute(
+                "SELECT role, content, hits FROM messages"
+                " WHERE conversation_id = ? ORDER BY id",
+                (self.conversation_id,),
+            ).fetchall()
+
+        out: list[BaseMessage] = []
+        for row in rows:
+            hits = json.loads(row["hits"]) if row["hits"] else []
+            if row["role"] == "user":
+                out.append(HumanMessage(content=row["content"]))
+            else:
+                out.append(AIMessage(content=row["content"],
+                                     additional_kwargs={"hits": hits}))
+        return out
+
+    def add_messages(self, messages: Sequence[BaseMessage]) -> None:
+        if not self.conversation_id:
+            raise ValueError("Create the conversation before adding messages.")
+
+        now = time.time()
+        with _connect() as con:
+            for message in messages:
+                hits = message.additional_kwargs.get("hits")
+                con.execute(
+                    "INSERT INTO messages"
+                    " (conversation_id, role, content, hits, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (self.conversation_id,
+                     "user" if message.type == "human" else "assistant",
+                     str(message.content),
+                     json.dumps(hits) if hits else None, now),
+                )
+            # updated_at drives the sidebar ordering, so a reopened chat floats
+            # up.
+            con.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, self.conversation_id),
+            )
+
+    def clear(self) -> None:
+        if not self.conversation_id:
+            return
+        with _connect() as con:
+            con.execute("DELETE FROM messages WHERE conversation_id = ?",
+                        (self.conversation_id,))
 
 
-def add_message(conversation_id: str, role: str, content: str,
-                hits: list[dict] | None = None) -> None:
-    now = time.time()
-    with _connect() as con:
-        con.execute(
-            "INSERT INTO messages"
-            " (conversation_id, role, content, hits, created_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (conversation_id, role, content,
-             json.dumps(hits) if hits else None, now),
-        )
-        # updated_at drives the sidebar ordering, so a reopened chat floats up.
-        con.execute(
-            "UPDATE conversations SET updated_at = ? WHERE id = ?",
-            (now, conversation_id),
-        )
+def answer_message(text: str, hits: list[dict] | None = None) -> AIMessage:
+    """An assistant turn carrying the books its answer was grounded in."""
+    return AIMessage(content=text, additional_kwargs={"hits": hits or []})
 
 
 def rename(conversation_id: str, title: str) -> None:

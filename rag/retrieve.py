@@ -1,7 +1,16 @@
-"""Similarity search over the book collection."""
+"""Similarity search over the book collection.
+
+LangChain's `similarity_search_with_relevance_scores` reads `hnsw:space` off
+the collection and picks `1 - distance` as its relevance score, which is the
+same number this project has always thresholded on — so MIN_SIMILARITY keeps
+its meaning.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from langchain_core.documents import Document
+from langchain_core.vectorstores import VectorStoreRetriever
 
 from . import config, store
 
@@ -18,6 +27,36 @@ class Hit:
     description: str
 
 
+def as_hit(document: Document, score: float, rank: int) -> Hit:
+    metadata = document.metadata
+    return Hit(
+        rank=rank,
+        similarity=score,
+        text=document.page_content,
+        title=metadata.get("title", "Untitled"),
+        authors=metadata.get("authors", ""),
+        year=metadata.get("year", ""),
+        rating=float(metadata.get("rating") or 0.0),
+        description=metadata.get("description", ""),
+    )
+
+
+def retriever(top_k: int | None = None,
+              min_similarity: float | None = None) -> VectorStoreRetriever:
+    """The same search as `search()`, as a Runnable for use inside a chain.
+
+    Returns bare Documents, so the UI's relevance bars use `search()` instead.
+    """
+    return store.vectorstore().as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={
+            "k": top_k or config.TOP_K,
+            "score_threshold": (config.MIN_SIMILARITY if min_similarity is None
+                                else min_similarity),
+        },
+    )
+
+
 def search(question: str, top_k: int | None = None,
            min_similarity: float | None = None) -> list[Hit]:
     question = (question or "").strip()
@@ -27,35 +66,18 @@ def search(question: str, top_k: int | None = None,
     top_k = top_k or config.TOP_K
     floor = config.MIN_SIMILARITY if min_similarity is None else min_similarity
 
-    coll = store.collection()
-    if coll.count() == 0:
+    total = store.count()
+    if total == 0:
         return []
 
-    # Query-side embedding is computed here so BGE's instruction prefix is
-    # applied; passing query_texts would embed it as if it were a document.
-    result = coll.query(
-        query_embeddings=[store.embed_query(question)],
-        n_results=min(top_k, coll.count()),
-        include=["documents", "metadatas", "distances"],
+    scored = store.vectorstore().similarity_search_with_relevance_scores(
+        question, k=min(top_k, total)
     )
 
     hits = []
-    for text, metadata, distance in zip(
-        result["documents"][0], result["metadatas"][0], result["distances"][0]
-    ):
-        similarity = 1.0 - float(distance)
-        if similarity < floor:
+    for document, score in scored:
+        if score < floor:
             continue
-
-        hits.append(Hit(
-            rank=len(hits) + 1,
-            similarity=similarity,
-            text=text,
-            title=metadata.get("title", "Untitled"),
-            authors=metadata.get("authors", ""),
-            year=metadata.get("year", ""),
-            rating=float(metadata.get("rating") or 0.0),
-            description=metadata.get("description", ""),
-        ))
+        hits.append(as_hit(document, float(score), len(hits) + 1))
 
     return hits
