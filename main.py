@@ -172,16 +172,3 @@ def chat(ask: Ask) -> dict:
         "reply_html": render(reply),
         "sources": as_sources(hits),
     }
-
-
-# --- temporary: surface the exception in the response, since the host's logs
-# are not readable from here. Remove once the failure is understood. ---
-@app.exception_handler(Exception)
-def _show_error(request: Request, exc: Exception):
-    import traceback
-    from fastapi.responses import JSONResponse
-    return JSONResponse(status_code=500, content={
-        "type": type(exc).__name__,
-        "message": str(exc)[:600],
-        "where": traceback.format_exc().strip().splitlines()[-6:],
-    })
