@@ -9,12 +9,10 @@
 </head>
 <body data-books="{{ books }}">
 
-<aside class="sidebar">
+<header class="topbar">
   <div class="brand">📚 Book Bot</div>
-  <button class="new-chat" id="new-chat">＋&nbsp; New chat</button>
-  <nav id="conversations" class="conversations"></nav>
-  <button class="clear-all" id="clear-all" hidden>Clear all history</button>
-</aside>
+  <button id="new-chat" class="new-chat" hidden>＋&nbsp; New chat</button>
+</header>
 
 <main class="main">
   <div class="thread" id="thread">
@@ -39,15 +37,9 @@
            aria-label="Ask about books">
     <button type="submit" id="send" aria-label="Send">↑</button>
   </form>
-</main>
 
-<dialog id="confirm">
-  <p id="confirm-text"></p>
-  <div class="confirm-actions">
-    <button value="cancel" id="confirm-no">Cancel</button>
-    <button value="ok" id="confirm-yes" class="danger">Delete</button>
-  </div>
-</dialog>
+  <p class="footnote">Conversations are not saved — closing this tab ends the chat.</p>
+</main>
 
 <script src="/static/app.js"></script>
 </body>

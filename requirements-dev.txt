@@ -1,0 +1,8 @@
+# Everything above, plus the tools that build the catalogue. None of this is
+# deployed: `rag.ingest` reads the CSV, `rag.migrate` and `browse.py` read the
+# local Chroma copy the catalogue was first built in.
+-r requirements.txt
+pandas==2.2.3
+chromadb==0.5.23
+# chromadb 0.5.x leaves posthog unpinned but still calls its pre-6.0 signature.
+posthog<6

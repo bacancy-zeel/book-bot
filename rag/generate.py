@@ -5,10 +5,10 @@ a free-tier key is enough here even though it could never have embedded the
 catalogue.
 
 The chain is `prompt | model | StrOutputParser`, one per configured model,
-stacked with `with_fallbacks` so a model that has burned through its daily
-free-tier quota hands over to the next one. Fallbacks fire on quota errors
-only: a bad key or a malformed request should surface immediately rather than
-be retried three times over.
+stacked with `with_fallbacks`, so a model that is out of quota or momentarily
+overloaded hands over to the next one. Those are the only two conditions that
+fall through: a bad key or a malformed request is not going to read any better
+on another model, so it surfaces at once.
 """
 from __future__ import annotations
 
@@ -53,13 +53,20 @@ class GenerationError(RuntimeError):
     pass
 
 
-class _QuotaExceeded(RuntimeError):
-    """Raised for a 429 so `with_fallbacks` can tell it from a real failure."""
+class _TryNextModel(RuntimeError):
+    """Raised for a failure another model might not have, so that
+    `with_fallbacks` can tell it apart from one that is worth reporting."""
 
 
-def _is_quota_error(error: Exception) -> bool:
+def _is_transient(error: Exception) -> bool:
+    """A 429 means this model's quota is spent; a 503 means it is briefly
+    overloaded. Either way a sibling model is worth a try, and retrying the
+    same one just makes the user wait."""
     text = str(error).lower()
-    return "429" in text or "quota" in text or "rate limit" in text
+    return any(marker in text for marker in (
+        "429", "quota", "rate limit",
+        "503", "unavailable", "overloaded", "high demand",
+    ))
 
 
 def _models() -> list[str]:
@@ -78,8 +85,8 @@ def _guarded(runnable: Runnable, name: str) -> Runnable:
         try:
             return runnable.invoke(payload)
         except Exception as error:  # provider errors vary too much to enumerate
-            if _is_quota_error(error):
-                raise _QuotaExceeded(name) from error
+            if _is_transient(error):
+                raise _TryNextModel(name) from error
             # Only the first line; the rest is a protobuf dump.
             raise GenerationError(str(error).strip().splitlines()[0]) from error
 
@@ -93,16 +100,16 @@ def chain() -> Runnable:
         _guarded(PROMPT | ChatGoogleGenerativeAI(
             model=name,
             google_api_key=config.GEMINI_API_KEY,
-            # The SDK retries a 429 six times by default, which on an exhausted
+            # The SDK retries six times by default, which on an exhausted
             # daily quota is half a minute of waiting for an answer that is
             # never coming. Falling through to the next model is this module's
-            # whole strategy, so surface the 429 at once and let it.
+            # whole strategy, so surface the failure at once and let it.
             max_retries=0,
         ) | StrOutputParser(), name)
         for name in _models()
     ]
     first, *rest = links
-    return first.with_fallbacks(rest, exceptions_to_handle=(_QuotaExceeded,))
+    return first.with_fallbacks(rest, exceptions_to_handle=(_TryNextModel,))
 
 
 def _context(hits: list[Hit]) -> str:
@@ -135,10 +142,10 @@ def answer(question: str, hits: list[Hit],
             "question": question,
             "history": history or [],
         })
-    except _QuotaExceeded as error:
+    except _TryNextModel as error:
         raise GenerationError(
-            "Daily free-tier quota is used up on every configured model "
-            f"({', '.join(_models())}). Try again tomorrow, set "
+            "Every configured model is out of quota or overloaded "
+            f"({', '.join(_models())}). Try again shortly, set "
             "GEMINI_CHAT_MODEL to another model, or enable billing on the API "
             "key."
         ) from error

@@ -16,8 +16,8 @@ meant to be read — are in [Design notes](#design-notes) below.
 
 - Ask questions in a chat UI; answers are grounded in the catalogue and cite every book they mention as `[1]`, `[2]`
 - Every answer expands to show which books it was based on, each with a relevance score
-- Conversation history in the sidebar, grouped by age, persisting across page refreshes and server restarts
-- Delete one conversation (with a confirm step) or clear all of them
+- Follow-up questions work: the page sends the turns so far with each question
+- Stateless server — nothing is written to disk
 - Embeddings run in-process — the whole catalogue indexes with no API key, no quota and no per-record cost
 - Ingestion is resumable: an interrupted run costs nothing
 - The page is only one client — every action it takes is a documented JSON endpoint, browsable at `/docs`
@@ -28,17 +28,16 @@ meant to be read — are in [Design notes](#design-notes) below.
 |---|---|
 | Web layer | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn (Python 3.10+) — serves the chat page and a JSON API |
 | Front end | One Jinja2 template, plain CSS and vanilla JS — no build step |
-| Orchestration | [LangChain](https://python.langchain.com/) — LCEL chain, `Document`s, retriever, chat message history |
+| Orchestration | [LangChain](https://python.langchain.com/) — LCEL chain, `Document`s, retriever |
 | Vector store | [Pinecone](https://www.pinecone.io/) serverless via `langchain-pinecone` — 768-dim, cosine |
 | Embeddings | `FastEmbedEmbeddings` over [fastembed](https://github.com/qdrant/fastembed) (ONNX, no PyTorch) — `BAAI/bge-base-en-v1.5`, 768-dim, run locally |
 | LLM (answers) | Google Gemini (`gemini-3.6-flash`) via `ChatGoogleGenerativeAI` — one call per question |
-| Chat history | SQLite — `./chat_history.sqlite3`, behind a LangChain `BaseChatMessageHistory` |
 | Source data | A Goodreads-style books CSV |
 
 ```
  Ingest → CSV row → one Document per book → Embed locally (BGE) → Upsert (Pinecone)
  Ask    → Embed question (BGE query prefix) → Retrieve nearest books (Pinecone, cosine)
-        → prompt | Gemini | StrOutputParser → cited answer → Persist (SQLite)
+        → prompt | Gemini | StrOutputParser → cited answer + its sources
 ```
 
 Embedding stays local even though storage is hosted: Pinecone holds the
@@ -74,7 +73,7 @@ vectors, but computing them costs nothing and is not rate limited — see
    |---|---|
    | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/) → Get API key. Answer generation only |
    | `GEMINI_CHAT_MODEL` | Defaults to `gemini-3.6-flash` |
-   | `GEMINI_FALLBACK_MODELS` | Tried in order on a 429 — free-tier quota is counted per model per day, so a sibling model is a fresh bucket |
+   | `GEMINI_FALLBACK_MODELS` | Tried in order when a model is out of quota (429) or overloaded (503) — free-tier quota is counted per model per day, so a sibling model is a fresh bucket |
    | `PINECONE_API_KEY` | [app.pinecone.io](https://app.pinecone.io/) → API keys |
    | `PINECONE_INDEX` | Index name; created on first use if missing (768-dim, cosine, serverless) |
    | `PINECONE_CLOUD` / `PINECONE_REGION` | Where a missing index gets created. Defaults to `aws` / `us-east-1` |
@@ -82,7 +81,7 @@ vectors, but computing them costs nothing and is not rate limited — see
    | `BOOKS_CSV` | Path to the catalogue |
    | `EMBED_MODEL` | Local embedding model; 768-dim by default. Changing it needs a new index |
    | `CHROMA_DIR` / `COLLECTION` | Read-only source for `rag.migrate` and `browse.py` |
-   | `HISTORY_DB` | SQLite file holding the chat sidebar; defaults to `./chat_history.sqlite3` |
+   | `EMBED_CACHE_DIR` | Where the ONNX model is cached; must be writable. Defaults to `/tmp/fastembed_cache` |
    | `TOP_K` | Books retrieved per question (default 5) |
    | `MIN_SIMILARITY` | Coarse junk filter, **not** the refusal mechanism — see [Design notes](#design-notes) |
    | `EMBED_BATCH` | Rows embedded per call; a memory/throughput knob, not a quota one |
@@ -121,6 +120,9 @@ vectors, but computing them costs nothing and is not rate limited — see
    ./.venv/bin/uvicorn main:app --reload
    ```
 
+   Indexing needs `pandas` and the local Chroma reader, which the deployed app
+   does not: install those with `pip install -r requirements-dev.txt`.
+
    Visit **http://localhost:8000**. The API's generated docs are at
    **/docs**.
 
@@ -128,11 +130,12 @@ vectors, but computing them costs nothing and is not rate limited — see
 
 1. Ask a question in the chat box, or pick one of the example prompts on the welcome screen.
 2. Expand **Sources** under any answer to see exactly which books it used, each with a percentage match.
-3. Past conversations are listed in the sidebar, grouped into Today / Yesterday / Previous 7 days / Previous 30 days / Older. Click one to reopen it, or **＋ New chat** to start fresh.
-4. Hover a conversation and click **✕** to delete it; you'll be asked to confirm. **Clear all history** removes every conversation at once.
+3. Ask a follow-up and it will be understood — the page sends the turns so far with the next question.
+4. **＋ New chat** starts over.
 
-History lives in SQLite rather than in the browser, so refreshing the page or
-restarting the server does not lose it.
+Nothing is stored. The conversation lives in the page that is having it, and
+closing the tab ends it. That is what lets the server run on a host with no
+writable disk.
 
 ## HTTP API
 
@@ -142,11 +145,7 @@ documented and testable at **/docs**:
 | Method | Path | Does |
 |---|---|---|
 | `GET` | `/api/status` | Number of books indexed |
-| `POST` | `/api/chat` | `{"question": "...", "conversation_id": null}` → the answer, its Markdown rendered to HTML, and the books it cited. Omitting `conversation_id` starts a new conversation and returns its id |
-| `GET` | `/api/conversations` | Every conversation, most recent first, grouped by age |
-| `GET` | `/api/conversations/{id}` | The turns of one conversation, each assistant turn carrying its sources |
-| `DELETE` | `/api/conversations/{id}` | Delete one conversation |
-| `DELETE` | `/api/conversations` | Delete all of them |
+| `POST` | `/api/chat` | `{"question": "...", "history": [{"role": "user", "content": "..."}]}` → the answer, its Markdown rendered to HTML, and the books it cited. `history` is optional and holds the earlier turns of this conversation |
 
 ```bash
 curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
@@ -155,8 +154,7 @@ curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
 
 Endpoints are declared `def` rather than `async def` on purpose: embedding a
 query and calling Gemini both block, so FastAPI runs them in a worker thread
-instead of stalling the event loop. `history.py` opens a SQLite connection per
-call, which is what makes that safe.
+instead of stalling the event loop.
 
 ## Inspecting the store
 
@@ -221,15 +219,15 @@ in half and glue it to an unrelated book.
 The pipeline is assembled from LangChain parts: ingestion builds `Document`s,
 the store is a `langchain-pinecone` vector store, retrieval goes through
 `similarity_search_with_relevance_scores`, generation is an LCEL chain
-(`prompt | model | StrOutputParser`), and the SQLite tables behind the sidebar
-are exposed as a `BaseChatMessageHistory` so past turns drop straight into the
-prompt's `MessagesPlaceholder`.
+(`prompt | model | StrOutputParser`), and the turns the page sends back become
+`HumanMessage`/`AIMessage` pairs in the prompt's `MessagesPlaceholder`.
 
-Two consequences worth knowing. The per-model quota fallback is `with_fallbacks`
-over one chain per model, firing on 429s only, so a bad key fails immediately
-instead of being retried three times over. And the books that grounded an answer
-ride in that message's `additional_kwargs`, so reopening a conversation redraws
-its source cards without re-running retrieval.
+Two consequences worth knowing. The per-model fallback is `with_fallbacks` over
+one chain per model, firing when a model is out of quota (429) or momentarily
+overloaded (503), so a bad key fails immediately instead of being retried
+across three models. And the books that grounded an answer
+come back with the answer, so the page can draw its source cards without
+re-running retrieval.
 
 One sharp edge is handled in `rag/store.py`. Pinecone scores a cosine match as
 a *similarity* — higher is closer — but LangChain's base vector store assumes
@@ -266,6 +264,5 @@ say "I don't know".
   State of Fear ahead of 1984, Brave New World and The Handmaid's Tale, all
   three of which are in the catalogue. Descriptions, not the query, are usually
   the limiting factor.
-- No accounts; one shared collection, and chat history is local to the machine
-  running the app.
+- No accounts, and no conversation is kept: closing the tab ends the chat.
 - No automated test suite.

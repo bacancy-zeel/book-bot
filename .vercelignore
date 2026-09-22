@@ -1,0 +1,9 @@
+# The catalogue lives in Pinecone now; none of this belongs in a 250MB bundle.
+chroma_data/
+data/
+api/data/
+*.sqlite3
+*.log
+.venv/
+__pycache__/
+requirements-dev.txt

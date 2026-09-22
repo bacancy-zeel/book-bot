@@ -1,21 +1,17 @@
+# What the deployed app needs, and nothing else — a serverless bundle is
+# capped at 250MB, and chromadb/pandas alone would blow through it. Ingesting
+# and migrating the catalogue happens on a workstation: see requirements-dev.txt.
+
 # Local, quota-free embeddings: fastembed runs BGE as ONNX in-process, so
-# nothing is metered and torch is not needed — which matters on a machine with
-# ~3GB RAM free.
+# nothing is metered and torch is not needed.
 fastembed==0.8.0
-# Read-only: `rag.migrate` and `browse.py` still open the local Chroma copy the
-# catalogue was first built in. Nothing else touches it.
-chromadb==0.5.23
-# chromadb 0.5.x leaves posthog unpinned but still calls its pre-6.0 signature.
-posthog<6
-# LangChain: Pinecone vector store, Gemini chat model, fastembed embeddings.
+# LangChain: Pinecone vector store and the Gemini chat model.
 langchain-core==1.6.4
 langchain-pinecone==0.2.13
-langchain-community==0.4.2
 langchain-google-genai==4.4.0
 # Web layer: FastAPI serves both the chat page and the JSON API.
 fastapi==0.141.1
 uvicorn==0.53.0
 jinja2==3.1.6
 markdown==3.10.3
-pandas==2.2.3
 python-dotenv==1.0.1

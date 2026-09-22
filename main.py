@@ -1,37 +1,35 @@
 """Book Bot — a RAG chatbot over a book catalogue, served by FastAPI.
 
-Pipeline: CSV -> one Document per book -> local ONNX embeddings -> ChromaDB
+Pipeline: CSV -> one Document per book -> local ONNX embeddings -> Pinecone
 cosine search -> Gemini writes a grounded answer citing the books it used.
 
-Only generation touches a hosted API. Embedding runs locally, so indexing the
-whole catalogue costs nothing and is not rate limited.
+Nothing is stored server-side. A conversation lives in the page that is having
+it: the browser keeps the turns so far and sends them with the next question,
+which is what lets a follow-up be understood, and closing the tab ends it.
 
-The HTTP layer is deliberately thin: it owns request shapes and Markdown
-rendering, and everything else lives in `rag/` and `history.py`, which know
-nothing about the web. `GET /` serves the chat page; the JSON endpoints under
-`/api` are the same surface the page uses, so anything else can drive the bot
-too — see the generated docs at `/docs`.
+`GET /` serves the chat page; the JSON endpoints under `/api` are the same
+surface the page uses, so anything else can drive the bot too — see the
+generated docs at `/docs`.
 
 Endpoints are plain `def`, not `async def`: embedding a query and calling
 Gemini both block, and FastAPI runs a sync endpoint in a worker thread instead
-of stalling the event loop. History opens a SQLite connection per call, which
-is what makes that safe.
+of stalling the event loop.
 """
 from __future__ import annotations
 
 import html
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import markdown
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from pydantic import BaseModel, Field
 
-import history
 from rag import store
 from rag.generate import GenerationError, answer
 from rag.retrieve import search
@@ -49,23 +47,31 @@ app = FastAPI(
                 "they were built from.",
     version="1.0.0",
 )
-# Anchored to this file rather than the working directory, so `uvicorn
-# main:app` behaves the same whatever directory it is launched from.
-HERE = Path(__file__).resolve().parent
-app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
-templates = Jinja2Templates(directory=HERE / "templates")
 
-history.init()
+# Anchored to this file rather than the working directory, so the app behaves
+# the same whatever directory it is launched from. `public/` is what a static
+# host serves directly; mounting it here keeps local runs self-contained.
+HERE = Path(__file__).resolve().parent
+app.mount("/static", StaticFiles(directory=HERE / "public" / "static"),
+          name="static")
+templates = Jinja2Templates(directory=HERE / "templates")
 
 
 # --------------------------------------------------------------------------
 # request/response models — these are what /docs documents
 # --------------------------------------------------------------------------
+class Turn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class Ask(BaseModel):
     question: str = Field(min_length=1, description="The user's question.")
-    conversation_id: str | None = Field(
-        default=None,
-        description="Continues that conversation. Omit to start a new one.",
+    history: list[Turn] = Field(
+        default_factory=list,
+        description="Earlier turns of this conversation, oldest first. The "
+                    "server keeps none of its own, so a follow-up question "
+                    "only makes sense if they are sent back.",
     )
 
 
@@ -80,25 +86,9 @@ class Source(BaseModel):
 
 
 class Reply(BaseModel):
-    conversation_id: str
-    title: str
     reply: str
     reply_html: str
     sources: list[Source]
-
-
-class Message(BaseModel):
-    role: str
-    content: str
-    content_html: str
-    sources: list[Source]
-
-
-class Conversation(BaseModel):
-    id: str
-    title: str
-    updated_at: float
-    group: str
 
 
 # --------------------------------------------------------------------------
@@ -113,22 +103,15 @@ def render(text: str) -> str:
     return markdown.markdown(html.escape(text), extensions=["sane_lists"])
 
 
-def group_of(timestamp: float) -> str:
-    day = datetime.fromtimestamp(timestamp).date()
-    days = (datetime.now().date() - day).days
-    if days <= 0:
-        return "Today"
-    if days == 1:
-        return "Yesterday"
-    if days < 7:
-        return "Previous 7 days"
-    if days < 30:
-        return "Previous 30 days"
-    return "Older"
+def as_messages(history: list[Turn]) -> list[BaseMessage]:
+    return [
+        HumanMessage(content=turn.content) if turn.role == "user"
+        else AIMessage(content=turn.content)
+        for turn in history
+    ]
 
 
 def as_sources(hits) -> list[dict]:
-    """Hits arrive as dataclasses live, and as plain dicts out of history."""
     out = []
     for hit in hits or []:
         hit = hit if isinstance(hit, dict) else asdict(hit)
@@ -142,11 +125,6 @@ def as_sources(hits) -> list[dict]:
             "description": hit.get("description", ""),
         })
     return out
-
-
-def require(conversation_id: str) -> None:
-    if not history.exists(conversation_id):
-        raise HTTPException(status_code=404, detail="No such conversation.")
 
 
 # --------------------------------------------------------------------------
@@ -168,79 +146,23 @@ def status() -> dict:
     return {"books": store.count()}
 
 
-@app.get("/api/conversations", response_model=list[Conversation],
-         summary="Every conversation, most recently used first")
-def conversations() -> list[dict]:
-    return [
-        {"id": c["id"], "title": c["title"], "updated_at": c["updated_at"],
-         "group": group_of(c["updated_at"])}
-        for c in history.conversations()
-    ]
-
-
-@app.get("/api/conversations/{conversation_id}", response_model=list[Message],
-         summary="The turns of one conversation")
-def messages(conversation_id: str) -> list[dict]:
-    require(conversation_id)
-    out = []
-    for message in history.ConversationHistory(conversation_id).messages:
-        text = str(message.content)
-        out.append({
-            "role": "user" if message.type == "human" else "assistant",
-            "content": text,
-            "content_html": render(text) if message.type != "human" else "",
-            "sources": as_sources(message.additional_kwargs.get("hits")),
-        })
-    return out
-
-
 @app.post("/api/chat", response_model=Reply, summary="Ask a question")
 def chat(ask: Ask) -> dict:
     question = ask.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="Ask something.")
 
-    conversation_id = ask.conversation_id
-    if conversation_id:
-        require(conversation_id)
-    else:
-        conversation_id = history.create(history.title_from(question))
-
-    chat_history = history.ConversationHistory(conversation_id)
-    # Read the thread before this turn is added, so the model sees the
-    # conversation as it stood when the question was asked.
-    thread = chat_history.messages
-    chat_history.add_user_message(question)
-
     hits = search(question)
     try:
-        reply = answer(question, hits, thread)
+        reply = answer(question, hits, as_messages(ask.history))
     except GenerationError as error:
         reply = (
             f"**Could not generate an answer.** {error}\n\n"
             "Retrieval still worked — the matching books are listed below."
         )
 
-    sources = as_sources(hits)
-    chat_history.add_messages([history.answer_message(reply, sources)])
-
     return {
-        "conversation_id": conversation_id,
-        "title": history.title_from(question),
         "reply": reply,
         "reply_html": render(reply),
-        "sources": sources,
+        "sources": as_sources(hits),
     }
-
-
-@app.delete("/api/conversations/{conversation_id}", status_code=204,
-            summary="Delete one conversation")
-def delete(conversation_id: str) -> None:
-    require(conversation_id)
-    history.delete(conversation_id)
-
-
-@app.delete("/api/conversations", status_code=204,
-            summary="Delete every conversation")
-def delete_all() -> None:
-    history.delete_all()
