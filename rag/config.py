@@ -14,11 +14,21 @@ def _float(name, default):
 
 
 BOOKS_CSV = os.getenv("BOOKS_CSV", "./data/book.csv")
+# 768-dim BGE. Changing this changes the vector width, and a Pinecone index is
+# fixed-width — switching models means a new index and a `--reset` rebuild.
+EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+PINECONE_INDEX = os.getenv("PINECONE_INDEX", "book-bot")
+# Where a missing index gets created. Both are free-tier serverless defaults.
+PINECONE_CLOUD = os.getenv("PINECONE_CLOUD", "aws")
+PINECONE_REGION = os.getenv("PINECONE_REGION", "us-east-1")
+# Namespaces partition one index; "" is Pinecone's default namespace.
+PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "")
+
+# Only `rag.migrate` reads these — the source Chroma store it copies from.
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_data")
 COLLECTION = os.getenv("COLLECTION", "books")
-# 768-dim BGE. Changing this changes the vector width, and a Chroma
-# collection is fixed-width — switching models means a --reset rebuild.
-EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-base-en-v1.5")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-3.6-flash")

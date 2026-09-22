@@ -1,15 +1,15 @@
 # Local, quota-free embeddings: fastembed runs BGE as ONNX in-process, so
 # nothing is metered and torch is not needed — which matters on a machine with
 # ~3GB RAM free.
+fastembed==0.8.0
+# Read-only: `rag.migrate` and `browse.py` still open the local Chroma copy the
+# catalogue was first built in. Nothing else touches it.
 chromadb==0.5.23
 # chromadb 0.5.x leaves posthog unpinned but still calls its pre-6.0 signature.
 posthog<6
-fastembed==0.8.0
-# LangChain: Chroma vector store, Gemini chat model, fastembed embeddings.
-# langchain-chroma is held at 0.2.x — its 1.x line requires chromadb 1.x,
-# whose on-disk format differs from the 0.5 store written here.
+# LangChain: Pinecone vector store, Gemini chat model, fastembed embeddings.
 langchain-core==1.6.4
-langchain-chroma==0.2.3
+langchain-pinecone==0.2.13
 langchain-community==0.4.2
 langchain-google-genai==4.4.0
 # Web layer: FastAPI serves both the chat page and the JSON API.

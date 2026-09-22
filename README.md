@@ -29,25 +29,27 @@ meant to be read — are in [Design notes](#design-notes) below.
 | Web layer | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn (Python 3.10+) — serves the chat page and a JSON API |
 | Front end | One Jinja2 template, plain CSS and vanilla JS — no build step |
 | Orchestration | [LangChain](https://python.langchain.com/) — LCEL chain, `Document`s, retriever, chat message history |
-| Vector store | [ChromaDB](https://www.trychroma.com/) 0.5 via `langchain-chroma` — persisted to `./chroma_data`, cosine distance |
+| Vector store | [Pinecone](https://www.pinecone.io/) serverless via `langchain-pinecone` — 768-dim, cosine |
 | Embeddings | `FastEmbedEmbeddings` over [fastembed](https://github.com/qdrant/fastembed) (ONNX, no PyTorch) — `BAAI/bge-base-en-v1.5`, 768-dim, run locally |
 | LLM (answers) | Google Gemini (`gemini-3.6-flash`) via `ChatGoogleGenerativeAI` — one call per question |
 | Chat history | SQLite — `./chat_history.sqlite3`, behind a LangChain `BaseChatMessageHistory` |
 | Source data | A Goodreads-style books CSV |
 
 ```
- Ingest → CSV row → one Document per book → Embed locally (BGE) → Store (ChromaDB)
- Ask    → Embed question (BGE query prefix) → Retrieve nearest books (ChromaDB, cosine)
+ Ingest → CSV row → one Document per book → Embed locally (BGE) → Upsert (Pinecone)
+ Ask    → Embed question (BGE query prefix) → Retrieve nearest books (Pinecone, cosine)
         → prompt | Gemini | StrOutputParser → cited answer → Persist (SQLite)
 ```
 
-Only generation touches a hosted API. Embedding is local, which is what makes
-indexing a few thousand books free — see [Design notes](#design-notes).
+Embedding stays local even though storage is hosted: Pinecone holds the
+vectors, but computing them costs nothing and is not rate limited — see
+[Design notes](#design-notes).
 
 ## Prerequisites
 
 - Python 3.10+
 - A [Google AI Studio](https://aistudio.google.com/) API key (free tier is enough) — used *only* to write answers, never to index
+- A [Pinecone](https://www.pinecone.io/) API key (the free serverless tier holds this catalogue comfortably)
 - A books CSV with `title`, `authors`, `description`, `original_publication_year`, `average_rating` and `book_id` columns
 - ~450 MB of disk: a ~210 MB one-time model download plus ~230 MB of index for a 4,766-book catalogue
 
@@ -73,10 +75,13 @@ indexing a few thousand books free — see [Design notes](#design-notes).
    | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/) → Get API key. Answer generation only |
    | `GEMINI_CHAT_MODEL` | Defaults to `gemini-3.6-flash` |
    | `GEMINI_FALLBACK_MODELS` | Tried in order on a 429 — free-tier quota is counted per model per day, so a sibling model is a fresh bucket |
+   | `PINECONE_API_KEY` | [app.pinecone.io](https://app.pinecone.io/) → API keys |
+   | `PINECONE_INDEX` | Index name; created on first use if missing (768-dim, cosine, serverless) |
+   | `PINECONE_CLOUD` / `PINECONE_REGION` | Where a missing index gets created. Defaults to `aws` / `us-east-1` |
+   | `PINECONE_NAMESPACE` | Optional partition within the index; empty means the default namespace |
    | `BOOKS_CSV` | Path to the catalogue |
-   | `CHROMA_DIR` | Where the vector store is persisted |
-   | `COLLECTION` | Chroma collection name |
-   | `EMBED_MODEL` | Local embedding model; 768-dim by default. Changing it requires `--reset` |
+   | `EMBED_MODEL` | Local embedding model; 768-dim by default. Changing it needs a new index |
+   | `CHROMA_DIR` / `COLLECTION` | Read-only source for `rag.migrate` and `browse.py` |
    | `HISTORY_DB` | SQLite file holding the chat sidebar; defaults to `./chat_history.sqlite3` |
    | `TOP_K` | Books retrieved per question (default 5) |
    | `MIN_SIMILARITY` | Coarse junk filter, **not** the refusal mechanism — see [Design notes](#design-notes) |
@@ -95,6 +100,15 @@ indexing a few thousand books free — see [Design notes](#design-notes).
    ./.venv/bin/python -m rag.ingest              # all rows
    ./.venv/bin/python -m rag.ingest 500          # first 500 books
    ./.venv/bin/python -m rag.ingest --reset      # wipe and rebuild
+   ```
+
+   If you already have the catalogue in a local Chroma store, copy it across
+   instead — the vectors exist, so nothing is re-embedded and the model is
+   never loaded:
+
+   ```bash
+   ./.venv/bin/python -m rag.migrate             # Chroma -> Pinecone
+   ./.venv/bin/python -m rag.migrate --reset     # clear the namespace first
    ```
 
    The first run downloads the embedding model. Each book gets a deterministic
@@ -154,9 +168,10 @@ call, which is what makes that safe.
 ./.venv/bin/python browse.py search "a novel about surveillance"
 ```
 
-Every command except `search` reads `chroma.sqlite3` directly in read-only mode,
-so it is safe to run while an ingest is still writing and never loads the
-embedding model. Only `search` needs the model (~400 MB RSS).
+`stats`, `list`, `show` and `grep` read the local `chroma.sqlite3` copy of the
+catalogue directly in read-only mode: no network and no embedding model.
+`search` is the odd one out — it goes through `rag.retrieve`, so it queries the
+live Pinecone index and loads the model (~400 MB RSS) to embed the question.
 
 ## Design notes
 
@@ -175,8 +190,8 @@ answer, which a free tier handles comfortably.
 
 ### Choosing the embedding model
 
-`BAAI/bge-base-en-v1.5`, chosen by measurement rather than default. ChromaDB's
-built-in `all-MiniLM-L6-v2` was tried first and did notably worse at thematic
+`BAAI/bge-base-en-v1.5`, chosen by measurement rather than default. The usual
+default, `all-MiniLM-L6-v2`, was tried first and did notably worse at thematic
 search on this catalogue — for *"a dystopian novel about surveillance and
 government control"* it surfaced spy thrillers rather than dystopias.
 
@@ -184,9 +199,9 @@ BGE is **asymmetric**: documents are embedded plain, queries get an instruction
 prefix. `FastEmbedEmbeddings` applies that split — `embed_query` goes through
 fastembed's `query_embed`, `embed_documents` through its plain `embed`.
 
-A Chroma collection is fixed-width, so changing `EMBED_MODEL` means a `--reset`
-rebuild. `BAAI/bge-small-en-v1.5` is the cheaper option — 384-dim, a third of
-the index size and several times faster to embed.
+A Pinecone index is fixed-width, so changing `EMBED_MODEL` means a new index.
+`BAAI/bge-small-en-v1.5` is the cheaper option — 384-dim, a third of the index
+size and several times faster to embed.
 
 ### What gets embedded
 
@@ -204,7 +219,7 @@ in half and glue it to an unrelated book.
 ### How the pieces fit
 
 The pipeline is assembled from LangChain parts: ingestion builds `Document`s,
-the store is a `langchain-chroma` vector store, retrieval goes through
+the store is a `langchain-pinecone` vector store, retrieval goes through
 `similarity_search_with_relevance_scores`, generation is an LCEL chain
 (`prompt | model | StrOutputParser`), and the SQLite tables behind the sidebar
 are exposed as a `BaseChatMessageHistory` so past turns drop straight into the
@@ -216,8 +231,22 @@ instead of being retried three times over. And the books that grounded an answer
 ride in that message's `additional_kwargs`, so reopening a conversation redraws
 its source cards without re-running retrieval.
 
-`langchain-chroma` is pinned to 0.2.x: its 1.x line requires ChromaDB 1.x, whose
-on-disk format differs from the 0.5 store this project writes.
+One sharp edge is handled in `rag/store.py`. Pinecone scores a cosine match as
+a *similarity* — higher is closer — but LangChain's base vector store assumes
+that number is a distance and returns `1 - score`, which inverts the ranking and
+silently breaks `MIN_SIMILARITY`. `BookVectorStore` overrides the relevance
+function to pass the score through untouched.
+
+### Where the vectors live
+
+Pinecone holds them; the embedding model does not. Computing a vector is the
+part that a hosted API meters, and that still runs in-process, so re-indexing
+the whole catalogue costs nothing. What the network buys is a store the app can
+reach from anywhere, instead of 229 MB of index sitting next to the process.
+
+`rag/migrate.py` is the one-way door between the two: it reads an existing
+Chroma collection and upserts the vectors it already holds, so moving a built
+catalogue across never loads the model or re-embeds a single book.
 
 ### Reading MIN_SIMILARITY
 

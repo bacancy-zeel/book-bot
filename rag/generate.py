@@ -91,7 +91,13 @@ def chain() -> Runnable:
     """Built once per process; the models are fixed by config at startup."""
     links = [
         _guarded(PROMPT | ChatGoogleGenerativeAI(
-            model=name, google_api_key=config.GEMINI_API_KEY,
+            model=name,
+            google_api_key=config.GEMINI_API_KEY,
+            # The SDK retries a 429 six times by default, which on an exhausted
+            # daily quota is half a minute of waiting for an answer that is
+            # never coming. Falling through to the next model is this module's
+            # whole strategy, so surface the 429 at once and let it.
+            max_retries=0,
         ) | StrOutputParser(), name)
         for name in _models()
     ]

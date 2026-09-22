@@ -1,9 +1,10 @@
-"""Inspect the Chroma store from the command line.
+"""Inspect the local Chroma copy of the catalogue from the command line.
 
-Most commands read chroma.sqlite3 directly in read-only mode, so they are safe
-to run while an ingest is still writing and they never load the embedding
-model. Only `search` needs the model (~400MB RSS) — keep it for when the
-machine has the memory to spare.
+`stats`, `list`, `show` and `grep` read chroma.sqlite3 directly in read-only
+mode: no network, no embedding model, and safe to run while something else is
+writing. `search` is the odd one out — it goes through `rag.retrieve`, so it
+queries the live Pinecone index and loads the model (~400MB RSS) to embed the
+question.
 
   python browse.py stats
   python browse.py list 20

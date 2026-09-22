@@ -1,4 +1,4 @@
-"""CSV -> one LangChain Document per book -> embedded into Chroma.
+"""CSV -> one LangChain Document per book -> embedded into Pinecone.
 
 Two decisions worth stating:
 
@@ -100,9 +100,11 @@ def ingest(path: str | None = None, limit: int | None = None,
 
     existing = set()
     if not reset:
-        # Resume: ask Chroma what it already has rather than re-embedding it.
+        # Resume: ask the index what it already holds rather than re-embedding
+        # it. `list` pages through ids without fetching a single vector.
         try:
-            existing = set(vectors.get(include=[])["ids"])
+            for page in store.index().list(namespace=config.PINECONE_NAMESPACE):
+                existing.update(page)
         except Exception:
             existing = set()
 

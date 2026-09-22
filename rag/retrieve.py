@@ -1,8 +1,7 @@
-"""Similarity search over the book collection.
+"""Similarity search over the book catalogue.
 
-`similarity_search_with_relevance_scores` reads `hnsw:space` off the collection
-and scores a hit as `1 - cosine distance`, which is what MIN_SIMILARITY is
-measured against.
+Pinecone scores a cosine match between -1 and 1, higher being closer, and that
+is the number MIN_SIMILARITY is measured against.
 """
 from __future__ import annotations
 
@@ -65,12 +64,10 @@ def search(question: str, top_k: int | None = None,
     top_k = top_k or config.TOP_K
     floor = config.MIN_SIMILARITY if min_similarity is None else min_similarity
 
-    total = store.count()
-    if total == 0:
-        return []
-
+    # No size check first: an empty index simply returns no matches, and
+    # every extra call here is a network round trip.
     scored = store.vectorstore().similarity_search_with_relevance_scores(
-        question, k=min(top_k, total)
+        question, k=top_k
     )
 
     hits = []
