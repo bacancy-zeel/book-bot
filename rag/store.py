@@ -16,16 +16,19 @@ on top and left 1984, Brave New World and The Handmaid's Tale outside the top
 An index is fixed-width, so changing EMBED_MODEL means a new index.
 
 BGE is an *asymmetric* model: documents are embedded plain, queries get an
-instruction prefix. `FastEmbedEmbeddings` applies that split — `embed_query`
-goes through fastembed's `query_embed`, `embed_documents` through its plain
-`embed`.
+instruction prefix. `BGEEmbeddings` keeps that split: `embed_query` goes
+through fastembed's `query_embed`, `embed_documents` through its plain `embed`.
+It wraps fastembed directly rather than using langchain-community's
+equivalent, which costs 32MB of transitive dependencies for the same fifteen
+lines — and that is most of the headroom in a size-capped bundle.
 """
 from __future__ import annotations
 
 import logging
 from typing import Callable
 
-from langchain_community.embeddings import FastEmbedEmbeddings
+from fastembed import TextEmbedding
+from langchain_core.embeddings import Embeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone, ServerlessSpec
 
@@ -38,10 +41,32 @@ DIMENSION = 768
 # vectors and metadata, not documents, so the text has to ride along.
 TEXT_KEY = "text"
 
-_embeddings: FastEmbedEmbeddings | None = None
+_embeddings: "BGEEmbeddings | None" = None
 _client: Pinecone | None = None
 _index = None
 _vectorstore: PineconeVectorStore | None = None
+
+
+class BGEEmbeddings(Embeddings):
+    """BGE through fastembed, with the model loaded on first use."""
+
+    def __init__(self) -> None:
+        self._model: TextEmbedding | None = None
+
+    def model(self) -> TextEmbedding:
+        if self._model is None:
+            self._model = TextEmbedding(
+                config.EMBED_MODEL, cache_dir=config.EMBED_CACHE_DIR)
+        return self._model
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [
+            vector.tolist() for vector in
+            self.model().embed(list(texts), batch_size=config.EMBED_BATCH)
+        ]
+
+    def embed_query(self, text: str) -> list[float]:
+        return next(iter(self.model().query_embed([text]))).tolist()
 
 
 class BookVectorStore(PineconeVectorStore):
@@ -53,14 +78,11 @@ class BookVectorStore(PineconeVectorStore):
         return lambda score: score
 
 
-def embeddings() -> FastEmbedEmbeddings:
+def embeddings() -> BGEEmbeddings:
     """The ONNX model, loaded once — it costs a second or two and ~400MB."""
     global _embeddings
     if _embeddings is None:
-        _embeddings = FastEmbedEmbeddings(
-            model_name=config.EMBED_MODEL,
-            batch_size=config.EMBED_BATCH,
-        )
+        _embeddings = BGEEmbeddings()
     return _embeddings
 
 

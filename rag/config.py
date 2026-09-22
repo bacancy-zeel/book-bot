@@ -47,6 +47,10 @@ TOP_K = _int("TOP_K", 5)
 # junk filter — the prompt is what actually makes the bot say "I don't know".
 MIN_SIMILARITY = _float("MIN_SIMILARITY", 0.15)
 
+# Where the ONNX model is cached. It must be writable, which on a host with a
+# read-only filesystem means somewhere under /tmp.
+EMBED_CACHE_DIR = os.getenv("EMBED_CACHE_DIR", "/tmp/fastembed_cache")
+
 # Rows embedded per forward pass. Local embedding has no quota, so this is
 # purely a memory/throughput knob — but it is a steep one. A batch is padded to
 # its longest member, and most blurbs here reach BGE's 512-token limit, so the
