@@ -49,12 +49,18 @@ app = FastAPI(
 )
 
 # Anchored to this file rather than the working directory, so the app behaves
-# the same whatever directory it is launched from. `public/` is what a static
-# host serves directly; mounting it here keeps local runs self-contained.
+# the same whatever directory it is launched from.
 HERE = Path(__file__).resolve().parent
-app.mount("/static", StaticFiles(directory=HERE / "public" / "static"),
-          name="static")
 templates = Jinja2Templates(directory=HERE / "templates")
+
+# `public/` is what a static host serves straight off its CDN, and such a host
+# has no reason to ship it to the application as well — so it may simply not be
+# there. Mounting it unconditionally would end the process at import, since
+# StaticFiles checks its directory up front. Serve it when it is present, which
+# is what makes a local run self-contained.
+STATIC = HERE / "public" / "static"
+if STATIC.is_dir():
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 # --------------------------------------------------------------------------
