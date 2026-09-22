@@ -1,0 +1,14 @@
+[theme]
+base = "light"
+primaryColor = "#c96442"
+backgroundColor = "#faf9f5"
+secondaryBackgroundColor = "#f0eee6"
+textColor = "#2f2f2c"
+
+[client]
+# Drops the "Deploy" button and the developer items from the top-right menu.
+# The remaining toolbar is hidden in CSS; this stops it being served at all.
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

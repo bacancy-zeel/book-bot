@@ -1,0 +1,11 @@
+# Local, quota-free embeddings: chromadb ships an ONNX MiniLM embedder
+# (all-MiniLM-L6-v2, 384-dim) so nothing is metered and torch is not needed —
+# which matters on a machine with ~3GB RAM free.
+chromadb==0.5.23
+# chromadb 0.5.x leaves posthog unpinned but still calls its pre-6.0 signature.
+posthog<6
+fastembed==0.8.0
+google-generativeai==0.8.3
+streamlit==1.40.2
+pandas==2.2.3
+python-dotenv==1.0.1

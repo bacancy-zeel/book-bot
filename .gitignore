@@ -1,0 +1,30 @@
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Secrets — never commit; .env.example is the template that IS committed
+.env
+.streamlit/secrets.toml
+
+# Generated vector store (rebuild with `python -m rag.ingest`)
+chroma_data/
+
+# Chat history (local to whoever runs the app)
+chat_history.sqlite3
+*.sqlite3
+
+# Run logs
+*.log
+
+# Source catalogue — a dataset, not source code
+data/
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/
