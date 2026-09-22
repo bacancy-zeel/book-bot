@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Book Bot</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><text y='52' font-size='52'>&#128218;</text></svg>">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-books="{{ books }}">
+
+<aside class="sidebar">
+  <div class="brand">📚 Book Bot</div>
+  <button class="new-chat" id="new-chat">＋&nbsp; New chat</button>
+  <nav id="conversations" class="conversations"></nav>
+  <button class="clear-all" id="clear-all" hidden>Clear all history</button>
+</aside>
+
+<main class="main">
+  <div class="thread" id="thread">
+    <section class="welcome" id="welcome">
+      <h1>What are you looking to read?</h1>
+      <p>Ask about the catalogue — every answer cites the books it used.</p>
+      {% if books %}
+      <div class="examples">
+        {% for example in examples %}
+        <button class="example" data-question="{{ example }}">{{ example }}</button>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="warning">The catalogue is empty. Run
+        <code>python -m rag.ingest</code> to index it.</p>
+      {% endif %}
+    </section>
+  </div>
+
+  <form class="composer" id="composer" autocomplete="off">
+    <input id="question" type="text" placeholder="Ask about books…"
+           aria-label="Ask about books">
+    <button type="submit" id="send" aria-label="Send">↑</button>
+  </form>
+</main>
+
+<dialog id="confirm">
+  <p id="confirm-text"></p>
+  <div class="confirm-actions">
+    <button value="cancel" id="confirm-no">Cancel</button>
+    <button value="ok" id="confirm-yes" class="danger">Delete</button>
+  </div>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

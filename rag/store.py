@@ -16,13 +16,11 @@ on top and left 1984, Brave New World and The Handmaid's Tale outside the top
 A collection is fixed-width, so changing EMBED_MODEL requires `--reset`.
 
 BGE is an *asymmetric* model: documents are embedded plain, queries get an
-instruction prefix. `FastEmbedEmbeddings` honours that split — `embed_query`
-calls fastembed's `query_embed`, `embed_documents` its plain `embed` — so the
-LangChain interface preserves the behaviour the retrieval quality depends on.
+instruction prefix. `FastEmbedEmbeddings` applies that split — `embed_query`
+goes through fastembed's `query_embed`, `embed_documents` through its plain
+`embed`.
 """
 from __future__ import annotations
-
-import logging
 
 import chromadb
 from chromadb.config import Settings
@@ -30,13 +28,6 @@ from langchain_chroma import Chroma
 from langchain_community.embeddings import FastEmbedEmbeddings
 
 from . import config
-
-# Chroma calls posthog's old `capture(user_id, event, properties)`; posthog >= 6
-# takes one positional argument, so every event raises a TypeError that Chroma
-# logs. Telemetry is off below, but Chroma tries the call regardless, so the
-# only way to keep the console readable on an env with a newer posthog is to
-# silence the logger that reports it. requirements.txt pins the working version.
-logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
 
 _embeddings: FastEmbedEmbeddings | None = None
 _client = None
@@ -55,8 +46,6 @@ def embeddings() -> FastEmbedEmbeddings:
 
 
 def client():
-    """One client per process. Streamlit reruns the script on every
-    interaction, so building a fresh client each time is pure overhead."""
     global _client
     if _client is None:
         _client = chromadb.PersistentClient(
@@ -75,9 +64,9 @@ def vectorstore(reset: bool = False) -> Chroma:
         client=client(),
         collection_name=config.COLLECTION,
         embedding_function=embeddings(),
-        # BGE vectors are meant to be compared by cosine; Chroma defaults to L2,
-        # which ranks differently. LangChain reads this back off the collection
-        # to pick `1 - distance` as its relevance score.
+        # BGE vectors are meant to be compared by cosine; Chroma defaults to
+        # L2, which ranks differently. LangChain reads this back off the
+        # collection to score a hit as `1 - distance`.
         collection_metadata={"hnsw:space": "cosine"},
     )
     if reset:

@@ -40,8 +40,8 @@ matched this question. Say so plainly and suggest the user rephrase or ask
 about a different subject. Do not answer from memory and do not cite anything.
 """
 
-# The instruction is passed as a *value*, not as template text, so brackets and
-# braces inside a book blurb are never mistaken for template variables.
+# The instruction is passed as a *value*, not as template text, so braces
+# inside a book blurb are never mistaken for template variables.
 PROMPT = ChatPromptTemplate.from_messages([
     ("system", "{instruction}"),
     MessagesPlaceholder("history"),

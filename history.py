@@ -9,8 +9,8 @@ stored turns drop straight into a prompt's MessagesPlaceholder. The retrieved
 books that backed an answer ride along in the message's `additional_kwargs`,
 where the UI reads them back to redraw its source cards.
 
-A connection is opened per call rather than cached: Streamlit reruns the script
-on its own threads, and a shared sqlite3 connection is not thread-safe.
+A connection is opened per call rather than cached: request handlers run on a
+worker thread pool, and a shared sqlite3 connection is not thread-safe.
 """
 from __future__ import annotations
 
@@ -147,8 +147,8 @@ class ConversationHistory(BaseChatMessageHistory):
                      str(message.content),
                      json.dumps(hits) if hits else None, now),
                 )
-            # updated_at drives the sidebar ordering, so a reopened chat floats
-            # up.
+            # updated_at drives the sidebar ordering, so a reopened chat
+            # floats up.
             con.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (now, self.conversation_id),

@@ -6,12 +6,16 @@ chromadb==0.5.23
 posthog<6
 fastembed==0.8.0
 # LangChain: Chroma vector store, Gemini chat model, fastembed embeddings.
-# langchain-chroma 1.x requires chromadb 1.x, which would migrate the on-disk
-# index — 0.2.x is the line that works against the 0.5 store.
+# langchain-chroma is held at 0.2.x — its 1.x line requires chromadb 1.x,
+# whose on-disk format differs from the 0.5 store written here.
 langchain-core==1.6.4
 langchain-chroma==0.2.3
 langchain-community==0.4.2
 langchain-google-genai==4.4.0
-streamlit==1.40.2
+# Web layer: FastAPI serves both the chat page and the JSON API.
+fastapi==0.141.1
+uvicorn==0.53.0
+jinja2==3.1.6
+markdown==3.10.3
 pandas==2.2.3
 python-dotenv==1.0.1

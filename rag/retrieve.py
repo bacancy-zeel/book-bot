@@ -1,9 +1,8 @@
 """Similarity search over the book collection.
 
-LangChain's `similarity_search_with_relevance_scores` reads `hnsw:space` off
-the collection and picks `1 - distance` as its relevance score, which is the
-same number this project has always thresholded on — so MIN_SIMILARITY keeps
-its meaning.
+`similarity_search_with_relevance_scores` reads `hnsw:space` off the collection
+and scores a hit as `1 - cosine distance`, which is what MIN_SIMILARITY is
+measured against.
 """
 from __future__ import annotations
 
@@ -45,7 +44,7 @@ def retriever(top_k: int | None = None,
               min_similarity: float | None = None) -> VectorStoreRetriever:
     """The same search as `search()`, as a Runnable for use inside a chain.
 
-    Returns bare Documents, so the UI's relevance bars use `search()` instead.
+    Yields bare Documents; `search()` is the one that carries scores.
     """
     return store.vectorstore().as_retriever(
         search_type="similarity_score_threshold",

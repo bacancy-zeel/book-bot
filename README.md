@@ -1,6 +1,6 @@
 # Book Bot
 
-A Streamlit chatbot that answers questions grounded in a book catalogue. Ask
+A FastAPI chatbot that answers questions grounded in a book catalogue. Ask
 *"recommend a dystopian novel about surveillance"* or *"who wrote The Hunger
 Games?"* and get an answer built only from the catalogue — with the exact books
 it used shown alongside the answer and scored. This is **R**etrieval-**A**ugmented
@@ -20,12 +20,14 @@ meant to be read — are in [Design notes](#design-notes) below.
 - Delete one conversation (with a confirm step) or clear all of them
 - Embeddings run in-process — the whole catalogue indexes with no API key, no quota and no per-record cost
 - Ingestion is resumable: an interrupted run costs nothing
+- The page is only one client — every action it takes is a documented JSON endpoint, browsable at `/docs`
 
 ## Architecture at a glance
 
 | Layer | Technology |
 |---|---|
-| UI | [Streamlit](https://streamlit.io/) 1.40 (Python 3.10+) |
+| Web layer | [FastAPI](https://fastapi.tiangolo.com/) + Uvicorn (Python 3.10+) — serves the chat page and a JSON API |
+| Front end | One Jinja2 template, plain CSS and vanilla JS — no build step |
 | Orchestration | [LangChain](https://python.langchain.com/) — LCEL chain, `Document`s, retriever, chat message history |
 | Vector store | [ChromaDB](https://www.trychroma.com/) 0.5 via `langchain-chroma` — persisted to `./chroma_data`, cosine distance |
 | Embeddings | `FastEmbedEmbeddings` over [fastembed](https://github.com/qdrant/fastembed) (ONNX, no PyTorch) — `BAAI/bge-base-en-v1.5`, 768-dim, run locally |
@@ -102,10 +104,11 @@ indexing a few thousand books free — see [Design notes](#design-notes).
 4. **Run the app**
 
    ```bash
-   ./.venv/bin/streamlit run app.py
+   ./.venv/bin/uvicorn main:app --reload
    ```
 
-   Visit **http://localhost:8501**.
+   Visit **http://localhost:8000**. The API's generated docs are at
+   **/docs**.
 
 ## Usage
 
@@ -114,8 +117,32 @@ indexing a few thousand books free — see [Design notes](#design-notes).
 3. Past conversations are listed in the sidebar, grouped into Today / Yesterday / Previous 7 days / Previous 30 days / Older. Click one to reopen it, or **＋ New chat** to start fresh.
 4. Hover a conversation and click **✕** to delete it; you'll be asked to confirm. **Clear all history** removes every conversation at once.
 
-History lives in SQLite rather than in Streamlit's session state, so refreshing
-the page or restarting the server does not lose it.
+History lives in SQLite rather than in the browser, so refreshing the page or
+restarting the server does not lose it.
+
+## HTTP API
+
+The page is just one client. Every action it takes is a public JSON endpoint,
+documented and testable at **/docs**:
+
+| Method | Path | Does |
+|---|---|---|
+| `GET` | `/api/status` | Number of books indexed |
+| `POST` | `/api/chat` | `{"question": "...", "conversation_id": null}` → the answer, its Markdown rendered to HTML, and the books it cited. Omitting `conversation_id` starts a new conversation and returns its id |
+| `GET` | `/api/conversations` | Every conversation, most recent first, grouped by age |
+| `GET` | `/api/conversations/{id}` | The turns of one conversation, each assistant turn carrying its sources |
+| `DELETE` | `/api/conversations/{id}` | Delete one conversation |
+| `DELETE` | `/api/conversations` | Delete all of them |
+
+```bash
+curl -s localhost:8000/api/chat -H 'Content-Type: application/json' \
+  -d '{"question": "Recommend a dystopian novel about surveillance"}'
+```
+
+Endpoints are declared `def` rather than `async def` on purpose: embedding a
+query and calling Gemini both block, so FastAPI runs them in a worker thread
+instead of stalling the event loop. `history.py` opens a SQLite connection per
+call, which is what makes that safe.
 
 ## Inspecting the store
 
@@ -154,9 +181,8 @@ search on this catalogue — for *"a dystopian novel about surveillance and
 government control"* it surfaced spy thrillers rather than dystopias.
 
 BGE is **asymmetric**: documents are embedded plain, queries get an instruction
-prefix. LangChain's `FastEmbedEmbeddings` keeps that split — `embed_query` calls
-fastembed's `query_embed`, `embed_documents` its plain `embed` — so the
-framework preserves the behaviour retrieval quality depends on.
+prefix. `FastEmbedEmbeddings` applies that split — `embed_query` goes through
+fastembed's `query_embed`, `embed_documents` through its plain `embed`.
 
 A Chroma collection is fixed-width, so changing `EMBED_MODEL` means a `--reset`
 rebuild. `BAAI/bge-small-en-v1.5` is the cheaper option — 384-dim, a third of
@@ -175,23 +201,23 @@ hundred tokens, so leading metadata pushes the blurb out of the window entirely.
 One record per book, never fixed-size chunks — a token window would cut a blurb
 in half and glue it to an unrelated book.
 
-### Where LangChain sits
+### How the pieces fit
 
-The pipeline is assembled from LangChain pieces rather than hand-rolled calls:
-ingestion builds `Document`s, the store is a `langchain-chroma` vector store,
-retrieval goes through `similarity_search_with_relevance_scores`, generation is
-an LCEL chain (`prompt | model | StrOutputParser`), and the sidebar's SQLite
-tables are exposed as a `BaseChatMessageHistory` so past turns drop straight
-into the prompt's `MessagesPlaceholder`.
+The pipeline is assembled from LangChain parts: ingestion builds `Document`s,
+the store is a `langchain-chroma` vector store, retrieval goes through
+`similarity_search_with_relevance_scores`, generation is an LCEL chain
+(`prompt | model | StrOutputParser`), and the SQLite tables behind the sidebar
+are exposed as a `BaseChatMessageHistory` so past turns drop straight into the
+prompt's `MessagesPlaceholder`.
 
-Two things it buys directly: the per-model quota fallback is `with_fallbacks`
-rather than a retry loop, and the retrieved books that grounded an answer ride
-in each message's `additional_kwargs`, so a reopened conversation redraws its
-source cards.
+Two consequences worth knowing. The per-model quota fallback is `with_fallbacks`
+over one chain per model, firing on 429s only, so a bad key fails immediately
+instead of being retried three times over. And the books that grounded an answer
+ride in that message's `additional_kwargs`, so reopening a conversation redraws
+its source cards without re-running retrieval.
 
-Version note: `langchain-chroma` 1.x requires ChromaDB 1.x, which would migrate
-the on-disk index. This project pins `langchain-chroma` 0.2.x, the line that
-works against a 0.5 store, so an existing `chroma_data/` needs no rebuild.
+`langchain-chroma` is pinned to 0.2.x: its 1.x line requires ChromaDB 1.x, whose
+on-disk format differs from the 0.5 store this project writes.
 
 ### Reading MIN_SIMILARITY
 

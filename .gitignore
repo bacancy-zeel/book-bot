@@ -9,7 +9,6 @@ __pycache__/
 
 # Secrets — never commit; .env.example is the template that IS committed
 .env
-.streamlit/secrets.toml
 
 # Generated vector store (rebuild with `python -m rag.ingest`)
 chroma_data/
