@@ -79,11 +79,22 @@ def _models() -> list[str]:
     return names
 
 
-def _guarded(runnable: Runnable, name: str) -> Runnable:
-    """Sort a model's failures into 'try the next model' and 'give up'."""
+def _guarded(runnable: Runnable, name: str,
+             plain: Runnable | None = None) -> Runnable:
+    """Sort a model's failures into 'try the next model' and 'give up'.
+
+    `plain` is the same model without a thinking budget. Some models (the
+    flash-lite line) reject the budget outright with a 400, and for those the
+    right move is to ask again without it rather than to give up.
+    """
     def invoke(payload: dict) -> str:
         try:
-            return runnable.invoke(payload)
+            try:
+                return runnable.invoke(payload)
+            except Exception as error:
+                if plain is None or "invalid_argument" not in str(error).lower():
+                    raise
+                return plain.invoke(payload)
         except Exception as error:  # provider errors vary too much to enumerate
             if _is_transient(error):
                 raise _TryNextModel(name) from error
@@ -93,20 +104,25 @@ def _guarded(runnable: Runnable, name: str) -> Runnable:
     return RunnableLambda(invoke)
 
 
+def _link(name: str, **options) -> Runnable:
+    return PROMPT | ChatGoogleGenerativeAI(
+        model=name,
+        google_api_key=config.GEMINI_API_KEY,
+        # The SDK retries six times by default, which on an exhausted
+        # daily quota is half a minute of waiting for an answer that is
+        # never coming. Falling through to the next model is this module's
+        # whole strategy, so surface the failure at once and let it.
+        max_retries=0,
+        **options,
+    ) | StrOutputParser()
+
+
 @lru_cache(maxsize=1)
 def chain() -> Runnable:
     """Built once per process; the models are fixed by config at startup."""
     links = [
-        _guarded(PROMPT | ChatGoogleGenerativeAI(
-            model=name,
-            google_api_key=config.GEMINI_API_KEY,
-            # The SDK retries six times by default, which on an exhausted
-            # daily quota is half a minute of waiting for an answer that is
-            # never coming. Falling through to the next model is this module's
-            # whole strategy, so surface the failure at once and let it.
-            max_retries=0,
-            thinking_budget=config.GEMINI_THINKING_BUDGET,
-        ) | StrOutputParser(), name)
+        _guarded(_link(name, thinking_budget=config.GEMINI_THINKING_BUDGET),
+                 name, plain=_link(name))
         for name in _models()
     ]
     first, *rest = links
