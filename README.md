@@ -74,6 +74,7 @@ vectors, but computing them costs nothing and is not rate limited — see
    | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com/) → Get API key. Answer generation only |
    | `GEMINI_CHAT_MODEL` | Defaults to `gemini-3.6-flash` |
    | `GEMINI_FALLBACK_MODELS` | Tried in order when a model is out of quota (429) or overloaded (503) — free-tier quota is counted per model per day, so a sibling model is a fresh bucket |
+   | `GEMINI_THINKING_BUDGET` | Tokens the model may spend reasoning before it answers. Defaults to `0`, which cuts an answer from ~10s to ~2s |
    | `PINECONE_API_KEY` | [app.pinecone.io](https://app.pinecone.io/) → API keys |
    | `PINECONE_INDEX` | Index name; created on first use if missing (768-dim, cosine, serverless) |
    | `PINECONE_CLOUD` / `PINECONE_REGION` | Where a missing index gets created. Defaults to `aws` / `us-east-1` |

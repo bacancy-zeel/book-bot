@@ -50,6 +50,11 @@ GEMINI_FALLBACK_MODELS = [
     ).split(",") if m.strip()
 ]
 
+# Tokens the model may spend reasoning before it writes. Left to itself it
+# spends ~1,400 of them to write a ~100-token answer, which is 10s of waiting
+# where 0 takes 2s — and picking from five retrieved books needs no reasoning.
+GEMINI_THINKING_BUDGET = _int("GEMINI_THINKING_BUDGET", 0)
+
 TOP_K = _int("TOP_K", 5)
 # Chroma returns cosine *distance*; similarity is 1 - distance. Chunks below
 # this are dropped so the model is not handed unrelated books. It is a coarse

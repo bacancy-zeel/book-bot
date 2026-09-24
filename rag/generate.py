@@ -105,6 +105,7 @@ def chain() -> Runnable:
             # never coming. Falling through to the next model is this module's
             # whole strategy, so surface the failure at once and let it.
             max_retries=0,
+            thinking_budget=config.GEMINI_THINKING_BUDGET,
         ) | StrOutputParser(), name)
         for name in _models()
     ]
